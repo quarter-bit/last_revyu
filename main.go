@@ -151,7 +151,8 @@ func InitRoutes(p *ProxyUser) *chi.Mux {
 	return r
 }
 
-// inject.go
+// internal/controller/app
+// app.go
 type App struct {
 	ProxyUser *ProxyUser
 }
