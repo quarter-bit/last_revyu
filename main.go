@@ -2,12 +2,9 @@
 // 1. Подключаться к базе данных
 // 2. Использовать кэш c применением Proxy паттерна
 // 3. Принимать http запросы REST like API
-
 // 4. Регистрировать пользователя в базе данных
 // 5. Выводить список всех пользователей
-
 // 6. У пользователя следующие данные email, password, name, age
-
 // 7. Запретить регистрацию пользователей с одинаковым email и возрастом меньше 18 лет
 
 package main
@@ -21,60 +18,84 @@ import (
 	"net/http"
 )
 
-// internal/models
+// internal/entities
 type User struct {
-	Email    string `json:"email"`
-	Password string `json:"password"`
-	Name     string `json:"name"`
-	Age      int    `json:"age"`
+	Email    string
+	Password string
+	Name     string
+	Age      int
 }
 
 type UserCache map[string]User
 
-// cmd
-func main() {
-	app := Injection()
-	app.Run()
+//cmd
 
+// internal//repo
+// db.go
+type DBController struct {
+	Db *sql.DB
 }
 
-// internal/repo
-// db
 func CreateTableINE(db *sql.DB) error {
 	_, err := db.Exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    email VARCHAR(255) NOT NULL,
-    password VARCHAR(255) NOT NULL,
-    name VARCHAR(255) NOT NULL,
+  CREATE TABLE IF NOT EXIST users (
+    email VARCHAR NOT NULL,
+    password VARCHAR NOT NULL,
+    name VARCHAR NOT NULL,
     age INT NOT NULL
   );
   `)
 	return err
 }
 
-func DBConnect() (DBController, error) {
+func DBConnection() *DBController {
 	db, err := sql.Open("postgress", "host=db port=5432 user=p password=pp5 dbname=pp sslmode=disable")
 	if err != nil {
 		log.Println(err)
-		return DBController{}, err
+		return nil
 	}
 	err = CreateTableINE(db)
 	if err != nil {
 		log.Println(err)
-		return DBController{}, err
+		return nil
 	}
-	return DBController{db}, nil
-}
-
-// other
-
-type DBController struct {
-	Db *sql.DB
+	return &DBController{db}
 }
 
 func (db *DBController) RAddUser(user User) error
 
+// реализация добавления юзера через инсерт инто
+
 func (db *DBController) RListUser() ([]User, error)
+
+// реализация собирания всех юзеров из бд в массив через селект
+
+// proxy.go
+type ProxyUser struct {
+	DbContr *DBController
+	Cache   *UserCache
+}
+
+func NewProxyUser(ui *DBController) *ProxyUser {
+	users := make(UserCache)
+	return &ProxyUser{ui, &users}
+}
+
+func (p *ProxyUser) StartCache() error
+
+//берем юзеров из базы данных и кладем в кэш
+
+func (p *ProxyUser) EndCache() error
+
+//берем юзеров из кэша и возвращаем в базу данных
+
+func (p *ProxyUser) RAddUser(user User) error
+
+// реализовываем апроверку пользователя по параметрам если подходит кэшируем и добавляем в базу данных
+
+func (p *ProxyUser) RListUser() ([]User, error)
+
+//берем юзеров из кэша и возвращаем
 
 // internal/service
 type RepoIface interface {
@@ -83,10 +104,10 @@ type RepoIface interface {
 }
 
 type ServiceUser struct {
-	RepoUSer RepoIface
+	PRepoUser *ProxyUser
 }
 
-func NewServiceUser(r RepoIface) *ServiceUser {
+func NewServiceUser(r *ProxyUser) *ServiceUser {
 	return &ServiceUser{r}
 }
 
@@ -95,80 +116,67 @@ func (s *ServiceUser) SAddUser(user User) error
 func (s *ServiceUser) SListUser() ([]User, error)
 
 // internal/controller
-// handlers.go
 type ServiceIface interface {
 	SAddUser(user User) error
 	SListUser() ([]User, error)
 }
 
 type ControllerUser struct {
-	ServiceUser ServiceIface
+	ServiceUser *ServiceUser
 }
 
-func NewControllerUser(s ServiceIface) *ControllerUser {
+func NewControllerUser(s *ServiceUser) *ControllerUser {
 	return &ControllerUser{s}
 }
 
-func (c *ControllerUser) SAddUser() http.HandlerFunc
+func (c *ControllerUser) AddUSer() http.HandlerFunc
+func (c *ControllerUser) ListUSer() http.HandlerFunc
 
-func (c *ControllerUser) SListUser() http.HandlerFunc
-
-// proxy.go
-type ProxyUser struct {
-	C     *ControllerUser
-	cache *UserCache
+type UserIface interface {
+	AddUser() http.HandlerFunc
+	ListUSer() http.HandlerFunc
 }
 
-func NewProxyUser(c *ControllerUser) *ProxyUser {
-	users := make(UserCache)
-	return &ProxyUser{c, &users}
-}
+//internal/controller/app
+//ap.go
 
-func (p *ProxyUser) SAddUser() http.HandlerFunc
-
-/*
-реализуем проверку пользователей по эмейлу и возрасту
-эмэйл делаем ключем кэша, возраст - значением
-если возраст не подходит то не добавляем, если подходит
-берем значение из кэша и если оно есть, то не добавляем юзера,
-если нет, то кэшируем и добавляем
-*/
-
-func (p *ProxyUser) SListUser() http.HandlerFunc
-
-/*
-получаем юзеров и возвращаем,
-сверяем результат с кэшем,
-если в кэше есть юзеры которых нет в базе
-добавляем в базу
-*/
-
-// routes.go
-func InitRoutes(p *ProxyUser) *chi.Mux {
-	r := chi.NewRouter()
-	r.Post("/user", p.SAddUser())
-	r.Get("/user", p.SListUser())
-	return r
-}
-
-// internal/controller/app
-// app.go
 type App struct {
-	ProxyUser *ProxyUser
+	UserIface *ControllerUser
+}
+
+func Inject() *App {
+	db := DBConnection()
+	proxy := NewProxyUser(db)
+	proxy.StartCache()
+	service := NewServiceUser(proxy)
+	controller := NewControllerUser(service)
+
+	return &App{
+		UserIface: controller,
+	}
 }
 
 func (a *App) Run() {
-	routs := InitRoutes(a.ProxyUser)
+
+	routs := InitRoutes(a.UserIface)
 	http.ListenAndServe(":8080", routs)
 }
 
-func Injection() *App {
-	db, err := DBConnect()
-	if err != nil {
-		log.Println(err)
-		return nil
-	}
-	return &App{
-		ProxyUser: NewProxyUser(NewControllerUser(NewServiceUser(&db))),
-	}
+func (a *App) Stop() {
+	a.UserIface.ServiceUser.PRepoUser.EndCache()
+	//реализация корректного завершения работы
+
+}
+
+func InitRoutes(p *ControllerUser) *chi.Mux {
+	r := chi.NewRouter()
+	r.Post("/user", p.AddUSer())
+	r.Get("/user", p.ListUSer())
+	return r
+}
+
+func main() {
+	app := Inject()
+	go app.Run()
+	app.Stop()
 }
